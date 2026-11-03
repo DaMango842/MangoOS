@@ -1,0 +1,34 @@
+# ---- Copyright: commercial ROMs are NOT redistributed. ----
+# roms/ holds user-provided .nes files; kernel32/fc/fc_rom.c is generated
+# from them by tools/fc/rom2c.py and must never be committed.
+roms/
+kernel32/fc/fc_rom.c
+
+# ---- build products ----
+image/
+
+# ---- stray capture output from ad-hoc QEMU debugging ----
+# (the root-level log/dump files were never gitignored and kept landing
+#  in the working tree)
+/log
+/make.log
+/mk.log
+/nul
+/3
+/probeout*.txt
+/qemu.log
+/qemu_err.txt
+*.log
+probe/build*.log
+probe/*.png
+probe/*.ppm
+probe/in_asm.log
+probe/int.log
+probe/mem*.bin        # captured guest-memory dumps
+
+# ---- generated / local tool state ----
+# tools/fcdbg/ holds throwaway RE sessions against FCEUX reference dumps
+tools/fcdbg/*.txt
+tools/fcdbg/*.bin
+tools/fc/ppu.bin
+.rules/

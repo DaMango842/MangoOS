@@ -1,0 +1,39 @@
+program        ::= [init_decl] (decl)*
+
+init_decl      ::= "init" IDENTIFIER
+
+decl           ::= var_decl
+                 | func_decl
+                 | class_decl
+
+var_decl       ::= "create"? IDENTIFIER ("=" expr | ":" type "=" expr)
+
+type           ::= "int" | "float" | "double" | "char" | "bool" | "string" | "void"
+
+func_decl      ::= "func" IDENTIFIER "(" [param_list] ")" ["->" type] block
+
+param_list     ::= param ("," param)*
+param          ::= IDENTIFIER ":" type
+
+class_decl     ::= "class" IDENTIFIER "{" (class_member)* "}"
+class_member   ::= access_mod (var_decl | func_decl)
+access_mod     ::= "pub" | "pri" | "pro"
+
+block          ::= "{" stmt* "}"
+
+stmt           ::= var_decl
+                 | expr 
+                 | "if" expr block ["elif" expr block]* ["else" block]
+                 | "while" expr block
+                 | "return" expr 
+
+expr           ::= assignment
+assignment     ::= logical_or ("=" assignment)?
+logical_or     ::= logical_and ("||" logical_and)*
+logical_and    ::= equality ("&&" equality)*
+equality       ::= relational (("==" | "!=") relational)*
+relational     ::= additive (("<" | "<=" | ">" | ">=") additive)*
+additive       ::= multiplicative (("+" | "-") multiplicative)*
+multiplicative ::= unary (("*" | "/" | "%") unary)*
+unary          ::= ("!" | "-") unary | primary
+primary        ::= NUMBER | STRING | FSTRING | IDENTIFIER | "(" expr ")"

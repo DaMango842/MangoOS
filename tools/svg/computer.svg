@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- computer icon: monitor + stand -->
+  <rect x="70" y="56" width="372" height="256" rx="20" fill="#3A4150"/>
+  <rect x="100" y="86" width="312" height="196" rx="10" fill="#4AA0E0"/>
+  <rect x="190" y="316" width="132" height="34" rx="8" fill="#3A4150"/>
+  <rect x="232" y="350" width="48" height="78" rx="6" fill="#3A4150"/>
+</svg>

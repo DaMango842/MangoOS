@@ -1,328 +1,174 @@
-; boot/stage2.asm - Full-featured Stage2 with command shell
-; Loaded to 0x7E00 by Stage1
+; boot/stage2.asm - Kernel loader
+; Loaded to 0x7E00 by stage1 (position read from the BootMap at LBA1).
+; Reads the C kernel as a RAW sector blob (position/size come from the
+; BootMap, passed by stage1 at 0x520-0x52B), then enters 32-bit protected
+; mode (A20 + GDT) and jumps to it at 0x10000.
+; The kernel filesystem is managed exclusively by the kernel itself; this
+; loader does not parse any file table.
 [org 0x7E00]
 [bits 16]
 
+KERNEL_SEG       equ 0x1000  ; Load at 0x1000:0000 = physical 0x10000
+KERNEL_ADDR      equ 0x10000 ; Flat linear address of the kernel entry
+BOOT_INFO_DRIVE  equ 0x500   ; boot drive byte
+BOOT_INFO_FS     equ 0x502   ; dword: kernel FS region start LBA
+K_PASS_LBA       equ 0x520   ; dword: kernel LBA (from stage1)
+K_PASS_SEC       equ 0x524   ; dword: kernel sector count (from stage1)
+K_PASS_FS        equ 0x528   ; dword: fs region start LBA (from stage1)
+
 start:
-    jmp entry
-
-; =========================
-; 模块 / 函数库区
-; =========================
-; 包含文件系统初始化代码
-%include "boot/filesys.asm"
-
-; =========================
-; 主入口
-; =========================
-
-entry:
-    ; 初始化段寄存器
+    cli
     xor ax, ax
     mov ds, ax
     mov es, ax
 
-    ; 设置安全栈（0x9000:0xFFFE ≈ 64KB 栈空间）
     mov ax, 0x9000
     mov ss, ax
     mov sp, 0xFFFE
 
-    call set_cursor_top_left
-
-    call clear_screen
-    mov si, welcome_msg
+    ; ---- report status ----
+    mov al, '2'
+    out 0xE9, al
+    mov si, msg_stage2
     call print_string
-    
-    call fs_init
-main_loop:
-    mov si, prompt
+
+    ; ---- recover boot drive (stage1 stored it at 0x7DFE) ----
+    mov al, [0x7DFE]
+    mov [boot_drive], al
+
+    ; ---- geometry probe for the CHS fallback path ----
+    call fs_probe_geometry
+    mov al, 'G'
+    out 0xE9, al
+
+    ; ---- load the kernel as a raw blob (LBA/sectors from stage1) ----
+    mov ax, [K_PASS_LBA]
+    mov [kernel_lba], ax
+    mov ax, [K_PASS_SEC]
+    mov [kernel_sectors], ax
+
+    mov ax, KERNEL_SEG
+    mov es, ax
+    xor bx, bx
+    mov ax, [kernel_lba]
+    mov cx, [kernel_sectors]
+    call disk_read
+    jc .error
+    mov al, 'L'
+    out 0xE9, al
+
+    ; ---- verify the kernel landed (entry begins with 0xFA = 'cli') ----
+    mov ax, KERNEL_SEG
+    mov es, ax
+    mov al, [es:0]
+    cmp al, 0xFA
+    je .kern_ok
+    mov al, '?'
+    out 0xE9, al
+    jmp .halt
+.kern_ok:
+    mov al, 'K'
+    out 0xE9, al
+
+    mov si, msg_kern_1
     call print_string
-    call read_line
 
-    mov al, [input_index]
-    test al, al
-    jz main_loop
+    ; ---- hand boot info to the kernel ----
+    mov al, [boot_drive]
+    mov [BOOT_INFO_DRIVE], al
+    mov eax, [K_PASS_FS]
+    mov dword [BOOT_INFO_FS], eax
 
-    ; help (4 chars)
-    mov si, input_buffer
-    mov di, cmd_help_str
-    mov cx, 4
-    call strncmp
-    jnc .do_help
+    ; ---- VBE framebuffer (best effort, real mode) ----
+    call vbe_init
+    cmp dword [BOOT_INFO_VBE_STATUS], 0
+    je .vbe_none
+    mov al, 'V'
+    out 0xE9, al
+    jmp .vbe_done
+.vbe_none:
+    mov al, 'v'
+    out 0xE9, al
+.vbe_done:
 
-    ; cls (3 chars)
-    mov si, input_buffer
-    mov di, cmd_cls_str
-    mov cx, 3
-    call strncmp
-    jnc .do_cls
+    ; ---- Enable A20 (fast gate on port 0x92) ----
+    mov al, 'P'
+    out 0xE9, al
+    in al, 0x92
+    or al, 0x02
+    and al, 0xFE
+    out 0x92, al
 
-    ; reboot (6 chars)
-    mov si, input_buffer
-    mov di, cmd_reboot_str
-    mov cx, 6
-    call strncmp
-    jnc .do_reboot
+    ; ---- Switch to 32-bit protected mode ----
+    mov al, '^'
+    out 0xE9, al
+    cli
+    lgdt [gdt_desc]
+    mov eax, cr0
+    or eax, 1
+    mov cr0, eax
+    jmp 0x08:pm_entry
 
-    ; echo (4 chars)
-    mov si, input_buffer
-    mov di, cmd_echo_str
-    mov cx, 4
-    call strncmp
-    jnc .do_echo
-
-    ; unknown
-    mov si, unknown_cmd
+.error:
+    mov si, err_msg
     call print_string
-    jmp main_loop
+.halt:
+    hlt
+    jmp .halt
 
-.do_help:
-    call cmd_help
-    jmp main_loop
+[bits 32]
+pm_entry:
+    ; Flat data segment (selector 0x10)
+    mov al, 'W'
+    out 0xE9, al
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
 
-.do_cls:
-    call cmd_cls
-    jmp main_loop
+    ; Fresh kernel stack (top at 0x90000, grows down)
+    mov esp, 0x90000
 
-.do_reboot:
-    call cmd_reboot
-    ; reboot 不返回，所以无需 jmp
+    ; Jump to the C kernel (linked at KERNEL_ADDR)
+    mov al, '>'
+    out 0xE9, al
+    jmp KERNEL_ADDR
 
-.do_echo:
-    call cmd_echo
-    jmp main_loop
+boot_drive db 0
+kernel_lba dw 0
+kernel_sectors dw 0
+err_msg db 'Kernel load failed', 13, 10, 0
+msg_stage2 db 'stage2 loaded', 13, 10, 0
+msg_kern_1 db 'kernel read ok', 13, 10, 0
 
-; ========================
-; 内置命令实现
-; ========================
-cmd_help:
-    call newline
-    mov si, help_text
-    call print_string
-    ret
+; ---- Minimal flat GDT ----
+align 4
+gdt:
+    dq 0                            ; null
+    ; code segment
+    dw 0xFFFF                       ; limit 15:0
+    dw 0x0000                       ; base 15:0
+    db 0x00                         ; base 23:16
+    db 0x9A                         ; access: P=1, DPL=0, code, exec, read
+    db 0xCF                         ; flags: 4KB, 32-bit; limit 19:16 = F
+    db 0x00                         ; base 31:24
+    ; data segment
+    dw 0xFFFF
+    dw 0x0000
+    db 0x00
+    db 0x92                         ; access: P=1, DPL=0, data, write
+    db 0xCF
+    db 0x00
 
-cmd_cls:
-    call clear_screen
-    ; call set_cursor_top_left
-    ret
+gdt_end:
+gdt_desc:
+    dw gdt_end - gdt - 1            ; limit (table size - 1)
+    dd gdt                          ; base (org-relative = physical, ds = 0)
 
-cmd_reboot:
-    call newline
-    mov si, reboot_msg
-    call print_string
-    ; 等待短暂时间让消息显示（可选）
-    mov cx, 0xFFFF
-.delay:
-    loop .delay
-    ; 然后重启
-    jmp 0xFFFF:0x0000
-
-cmd_echo:
-    call newline
-    mov si, input_buffer
-    add si, 4           ; 跳过 "echo"
-.skip_space:
-    lodsb
-    cmp al, ' '
-    je .skip_space      ; 跳过多余空格
-    or al, al
-    jz .done
-    ; 回退一个字符（因为 lodsb 已经读走了）
-    dec si
-.print_rest:
-    lodsb
-    or al, al
-    jz .done
-    call print_char
-    jmp .print_rest
-.done:
-    call newline
-    ret
-
-; ========================
-; I/O 函数
-; ========================
-print_string:
-    push ax
-.loop:
-    lodsb
-    or al, al
-    jz .done
-    call print_char
-    jmp .loop
-.done:
-    pop ax
-    ret
-
-print_char:
-    push ax
-    mov ah, 0x0E        ; Teletype output
-    int 0x10
-    pop ax
-    ret
-
-newline:
-    push ax
-    mov al, 13
-    call print_char
-    mov al, 10
-    call print_char
-    pop ax
-    ret
-
-clear_screen:
-    mov ax, 0x0700      ; Scroll up
-    mov bh, 0x07        ; White on black attribute
-    mov cx, 0           
-    mov dx, 0x184F      ; Bottom-right (24,79)
-    int 0x10
-    
-    mov ah, 0x02
-    mov bh, 0
-    mov dh, 0
-    mov dl, 0
-    int 0x10
-    ret
-
-; ========================
-; 输入函数：读取一行（带退格）
-; 结果存入 input_buffer（以 0 结尾）
-; ========================
-read_line:
-    push ax
-    push si
-    mov byte [input_index], 0
-
-.read_char:
-    mov ah, 0x00
-    int 0x16            ; Wait for key
-
-    cmp al, 13          ; Enter?
-    je .done
-
-    cmp al, 8           ; Backspace?
-    je .backspace
-
-    ; 只接受可打印 ASCII（32~126）
-    cmp al, ' '
-    jb .read_char
-    cmp al, 126
-    ja .read_char
-
-    ; 检查缓冲区是否满（31 字符）
-    mov si, input_index
-    cmp byte [si], 31
-    jge .read_char
-
-    ; 存入缓冲区
-    mov di, input_buffer
-    movzx bx, byte [si]
-    add di, bx
-    mov [di], al
-    inc byte [input_index]
-
-    ; 回显
-    call print_char
-    jmp .read_char
-
-.backspace:
-    mov si, input_index
-    cmp byte [si], 0
-    je .read_char
-    dec byte [si]
-
-    ; 回显退格：BS + space + BS
-    mov al, 8
-    call print_char
-    mov al, ' '
-    call print_char
-    mov al, 8
-    call print_char
-    jmp .read_char
-
-.done:
-    ; 添加字符串结束符
-    mov si, input_index
-    mov di, input_buffer
-    movzx bx, byte [si]
-    add di, bx
-    mov byte [di], 0
-
-    call newline
-    pop si
-    pop ax
-    ret
-
-; 比较 SI 和 DI 的前 CX 个字符
-; 返回：CF=0 if equal, CF=1 if not equal
-strncmp:
-    push ax
-    push si
-    push di
-.loop:
-    cmp cx, 0
-    je .equal
-    lodsb               ; AL = [SI++]
-    mov ah, [di]        ; AH = [DI]
-    inc di
-    cmp al, ah
-    jne .not_equal
-    dec cx
-    jmp .loop
-.equal:
-    clc
-    jmp .done
-.not_equal:
-    stc
-.done:
-    pop di
-    pop si
-    pop ax
-    ret
-
-; 设置光标到屏幕左上角 (row=0, col=0)
-set_cursor_top_left:
-    push ax
-    push bx
-    push dx
-    mov ah, 0x02        ; BIOS: Set cursor position
-    mov bh, 0x00        ; Page 0
-    mov dh, 0           ; Row = 0
-    mov dl, 0           ; Column = 0
-    int 0x10
-    pop dx
-    pop bx
-    pop ax
-    ret
-
-; ========================
-; 数据区
-; ========================
-
-
-welcome_msg     db 'Simple OS v0.2 [Stage2 Shell]', 13, 10, 0
-prompt          db 'A:\> ', 0
-help_text       db 'Built-in commands:', 13, 10
-                db '  help    - Show this help', 13, 10
-                db '  cls     - Clear screen', 13, 10
-                db '  reboot  - Restart system', 13, 10
-                db '  echo    - Echo arguments', 13, 10, 0
-reboot_msg      db 'Rebooting...', 0
-unknown_cmd     db 'Unknown command. Type "help" for list.', 13, 10, 0
-
-cmd_help_str    db 'help'
-cmd_cls_str     db 'cls'
-cmd_reboot_str  db 'reboot'
-cmd_echo_str    db 'echo'
-
-fs_init_error_msg db 'File system initialization failed.', 13, 10, 0
-
-
-
-; 输入缓冲区
-input_buffer:
-    times 32 db 0       ; 31 chars + null terminator
-input_index     db 0
-
-; 填充到 2048 字节（确保磁盘读取完整）
-times 2048 - ($ - $$) db 0
+[bits 16]
+%include "boot/printlib.asm"
+%include "boot/filesys/disk.asm"
+%include "boot/filesys/geometry.asm"
+%include "boot/vbe.asm"
